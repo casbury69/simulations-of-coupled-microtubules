@@ -1,0 +1,1208 @@
+#pragma TextEncoding = "UTF-8"
+#pragma rtGlobals=3				// Use modern global access method and strict wave access
+#pragma DefaultTab={3,20,4}		// Set default tab width in Igor Pro 9 and later
+
+//--------------------------------------------------------------------------------------
+// Builds control panel to run simulations
+
+Window bundle_sim() : Panel
+	PauseUpdate; Silent 1		// building window...
+	NewPanel /W=(527,118,968,411) as "Bundle Sim Control Panel"
+	ModifyPanel cbRGB=(0,50000,50000)
+	ShowTools/A
+	Button StartButton,pos={121.00,244.00},size={100.00,20.00},proc=StartButtonProc
+	Button StartButton,title="Run Simulations"
+	PopupMenu ModelClass,pos={12.00,23.00},size={116.00,17.00},proc=ModelClassProc
+	PopupMenu ModelClass,title="Model Class",fSize=12
+	PopupMenu ModelClass,mode=3,popvalue="Pausing",value=#"\"Non-pausing;Pausing\""
+	SetVariable SimNum,pos={11.00,72.00},size={191.00,19.00}
+	SetVariable SimNum,title="Number of Simulations",limits={1,100000,1},value=w[25]
+	SetVariable MTnum,pos={12.00,45.00},size={170.00,19.00}
+	SetVariable MTnum,title="Number of Microtubules",limits={1,100,1},value=w[26]
+	SetVariable TimeInt,pos={11.00,123.00},size={118.00,19.00}
+	SetVariable TimeInt,title="Time Interval [s]",limits={0.001,100,0.001},value=w[27]
+	SetVariable SimTime,pos={11.00,97.00},size={151.00,19.00}
+	SetVariable SimTime,title="Simulation Time [s]",limits={0,100000,1},value=w[28]
+	CheckBox StochasticEnds,pos={211.00,23.00},size={135.00,16.00}
+	CheckBox StochasticEnds,title="Stochastic Endings On?",wave=w[32]
+	CheckBox SingleState,pos={210.00,46.00},size={99.00,16.00}
+	CheckBox SingleState,title="Single State On?",wave=w[35]
+	SetVariable model_score,pos={104.00,171.00},size={151.00,19.00}
+	SetVariable model_score,title="Survival score",value=model_score_wave[0]
+	SetVariable model_score_uncoupled,pos={111.00,195.00},size={151.00,19.00}
+	SetVariable model_score_uncoupled,title="Stdev score"
+	SetVariable model_score_uncoupled,value=model_score_stdev_wave[0]
+	CheckBox SingleState1,pos={210.00,69.00},size={121.00,16.00}
+	CheckBox SingleState1,title="Vary growth speeds?",wave=w[34]
+EndMacro
+
+//-----------------------------------------------------------------------------------------------------------------------------------------------------
+// Creates windows so we can append plots to them later
+
+function make_plots_before_running_sims()
+	
+	// simulated spray traces
+	DoWindow/Z/K Tip_Separation_Soft_Sim_Spray_Traces // break causality to kill a window that never existed
+	display
+	DoWindow/C $"Tip_Separation_Soft_Sim_Spray_Traces"
+	DoWindow/Z/K Tip_Separation_Stiff_Sim_Spray_Traces // breaks causality again
+	display
+	DoWindow/C $"Tip_Separation_Stiff_Sim_Spray_Traces"
+
+	// survival plots
+	DoWindow/Z/K Kaplan_Meier_Survival_Plot_400
+	display
+	DoWindow/C $"Kaplan_Meier_Survival_Plot_400"
+	DoWindow/Z/K Kaplan_Meier_Survival_Plot_600
+	display
+	DoWindow/C $"Kaplan_Meier_Survival_Plot_600"
+	DoWindow/Z/K Kaplan_Meier_Survival_Plot_800
+	display
+	DoWindow/C $"Kaplan_Meier_Survival_Plot_800"
+	DoWindow/Z/K Kaplan_Meier_Survival_Plot_1200
+	display
+	DoWindow/C $"Kaplan_Meier_Survival_Plot_1200"
+end
+
+//-----------------------------------------------------------------------------------------
+// Runs simulations based on control panel info
+
+Function StartButtonProc(ctrlName) : ButtonControl
+	String ctrlName
+	wave w // wave holding parameters and simulation options entered in the control panel 
+	make/o/n=(22) o // options wave for internal simulation control
+	o = 0 // reset
+	o[0] = 1 // MTs are growing initially
+	if(w[35] == 1) // Single-state (simulation ends if catastrophe/rescue occurs)
+		o[1] = 1 
+	endif
+	if(w[34] == 1) // vary growth rates
+		o[4] = 1
+	endif
+	o[2] = 1 // low-tension limit is disabled
+
+	if(w[31] == 1) // use pause-y model
+		o[16] = 1 // enables pausing
+	endif
+	
+	// set o parameters for stochastic endings (or not)
+	if(w[32] == 1) // stochastic endings are turned ON
+		o[7] = 1 // MTs can detach
+		o[9] = 1 // MTs can switch between growth and shortening
+		o[18] = 1 // crap falls in the trap		
+	endif	
+
+	variable tott = w[28] // Total simulation time [s]
+	variable maxstep = w[27] // maximum timestep size for Monte Carlo sims [s]
+	variable sim_num = w[25] // number of simulations to perform
+	variable N = w[26] // number of MTs
+	
+	make_plots_before_running_sims() // window creation if necessary
+	
+	// run simulations for soft-coupled and stiff-coupled MT pairs
+	variable i,j //counter	
+	for(i=1;i<3;i++)		
+		if(i==1)
+			w[8] = 1 // soft-coupled, k = 1 pN/um
+		else // i == 2
+			w[8] = 5 // stiff-coupled, k = 5 pN/um
+		endif
+		w[10] = 8 // set external force to 8 pN
+		kpsim_rep(tott,maxstep,sim_num,N)
+		survival_plot_sim() // calculate kaplan meier survival statistics for this set of simulations
+		display_simulated_data(i)		
+	endfor
+	
+	// generates in vitro plots for comparison
+	display_invitro_data() // add spray traces for non-4pN forces here
+	score_model_survival()
+	
+	DoWindow/F bundle_sim // brings back the bundle sim control panel window
+end
+
+//--------------------------------------------------------------------------------------------------------------------
+// Runs the pop-up menu that lets you select pausing or non-pausing (deterministic) model
+
+Function ModelClassProc(ctrlName,popNum,popStr) : PopupMenuControl
+	String ctrlName
+	variable popnum
+	String popstr
+	wave w
+	
+	if(cmpstr(popstr,"Non-pausing") == 0) // use the non-pausing (deterministic) model
+		w[29] = 1
+		w[30] = 0
+		w[31] = 0
+	elseif(cmpstr(popstr,"Pausing") == 0) // use the pausing model
+		w[29] = 0
+		w[30] = 0
+		w[31] = 1
+	endif
+
+end
+
+//--------------------------------------------------------------------------------------------------
+// Display simulated data
+
+function display_simulated_data(i)
+	variable i // tells function which simulation set we're doing
+	variable j // counter
+	
+	wave avgd_matrix
+	// matrix with tip separations for all simulations and corresponding timewave
+	wave avgd_1s_intervals,avgd_1s_intervals_SEM,avgd_1s_intervals_Stdev
+	// waves with mean and SEM tip separation for all sims
+	wave sim_survival_400_KM,sim_survival_600_KM,sim_survival_800_KM,sim_survival_1200_KM
+	// waves for kaplan meier survival plots
+
+	make/o/n=(401) timewave_1s // timewave with 1s intervals to plot sims against
+	timewave_1s = x
+	
+	// duplicate current set of simulations into either soft (1) or stiff (2) waves
+	Duplicate/O avgd_matrix,$("avgd_matrix" + num2str(i))
+	Duplicate/O sim_survival_400_KM,$("sim_survival_400_KM" + num2str(i))
+	Duplicate/O sim_survival_600_KM,$("sim_survival_600_KM" + num2str(i))
+	Duplicate/O sim_survival_800_KM,$("sim_survival_800_KM" + num2str(i))
+	Duplicate/O sim_survival_1200_KM,$("sim_survival_1200_KM" + num2str(i))
+	Duplicate/O avgd_1s_intervals,$("avgd_1s_intervals_" + num2str(i))
+	Duplicate/O avgd_1s_intervals_SEM,$("avgd_1s_intervals_SEM" + num2str(i))
+	Duplicate/O avgd_1s_intervals_Stdev,$("avgd_1s_intervals_Stdev" + num2str(i))
+
+	// append simulation data to existing graphs
+	if(i==1) //soft-coupled
+		DoWindow/F $"Tip_Separation_Soft_Sim_Spray_Traces"
+	elseif(i==2) // stiff-coupled
+		DoWindow/F $"Tip_Separation_Stiff_Sim_Spray_Traces"
+	endif
+	RemoveFromGraph/all
+		
+	wave avgd_matrix1,avgd_matrix2 // soft and stiff tip separations
+	
+	appendtograph $("avgd_1s_intervals_" + num2str(i)) vs timewave_1s
+	for(j=0;j<40;j++) // 40 example traces (simulations)
+		if(i==1) // soft coupled
+			appendtograph avgd_matrix1[][j] vs timewave_1s // append single example trace/sim
+			ModifyGraph rgb($("avgd_matrix1#"+num2str(j)))=(32768,40777,65535) // light blue for the soft coupler examples
+			ModifyGraph rgb(avgd_1s_intervals_1)=(1,12815,52428) // dark blue for the soft coupler average
+		elseif(i==2) // stiff coupled
+			appendtograph avgd_matrix2[][j] vs timewave_1s // append single example trace/sim
+			ModifyGraph rgb($("avgd_matrix2#"+num2str(j)))=(65535,32768,32768) // light red for the stiff coupler examples
+		endif
+	endfor
+	ErrorBars $("avgd_1s_intervals_" + num2str(i)) Y,wave=($("avgd_1s_intervals_SEM" + num2str(i)),$("avgd_1s_intervals_SEM" + num2str(i)))
+	ErrorBars $("avgd_1s_intervals_" + num2str(i)) SHADE= {0,0,(0,0,0,0),(0,0,0,0)},wave=($("avgd_1s_intervals_SEM" + num2str(i)),$("avgd_1s_intervals_SEM" + num2str(i)))
+	ModifyGraph manTick(left)={0,1,0,0},manMinor(left)={1,0}
+	label bottom "Time [s]"
+	label left "Tip separation [µm]"
+	ModifyGraph fSize=8,font="Myriad Pro"
+	SetAxis left 0,3 // 0 to 3 um
+	ModifyGraph lsize($("avgd_1s_intervals_" + num2str(i)))=2
+	ModifyGraph width=180,height=93.6
+	
+	// put average tip separation plot on top
+	if(i==1) // soft
+		ReorderTraces avgd_1s_intervals_1,{avgd_matrix1,avgd_matrix1#1,avgd_matrix1#2,avgd_matrix1#3,avgd_matrix1#4,avgd_matrix1#5,avgd_matrix1#6,avgd_matrix1#7,avgd_matrix1#8,avgd_matrix1#9,avgd_matrix1#10,avgd_matrix1#11,avgd_matrix1#12,avgd_matrix1#13,avgd_matrix1#14,avgd_matrix1#15,avgd_matrix1#16,avgd_matrix1#17,avgd_matrix1#18,avgd_matrix1#19,avgd_matrix1#20,avgd_matrix1#21,avgd_matrix1#22,avgd_matrix1#23,avgd_matrix1#24,avgd_matrix1#25,avgd_matrix1#26,avgd_matrix1#27,avgd_matrix1#28,avgd_matrix1#29,avgd_matrix1#30,avgd_matrix1#31,avgd_matrix1#32,avgd_matrix1#33,avgd_matrix1#34,avgd_matrix1#35,avgd_matrix1#36,avgd_matrix1#37,avgd_matrix1#38,avgd_matrix1#39}
+	else // stiff, i==2
+		ReorderTraces avgd_1s_intervals_2,{avgd_matrix2,avgd_matrix2#1,avgd_matrix2#2,avgd_matrix2#3,avgd_matrix2#4,avgd_matrix2#5,avgd_matrix2#6,avgd_matrix2#7,avgd_matrix2#8,avgd_matrix2#9,avgd_matrix2#10,avgd_matrix2#11,avgd_matrix2#12,avgd_matrix2#13,avgd_matrix2#14,avgd_matrix2#15,avgd_matrix2#16,avgd_matrix2#17,avgd_matrix2#18,avgd_matrix2#19,avgd_matrix2#20,avgd_matrix2#21,avgd_matrix2#22,avgd_matrix2#23,avgd_matrix2#24,avgd_matrix2#25,avgd_matrix2#26,avgd_matrix2#27,avgd_matrix2#28,avgd_matrix2#29,avgd_matrix2#30,avgd_matrix2#31,avgd_matrix2#32,avgd_matrix2#33,avgd_matrix2#34,avgd_matrix2#35,avgd_matrix2#36,avgd_matrix2#37,avgd_matrix2#38,avgd_matrix2#39}
+	endif
+	
+	// survival plot to show when tip separation has exceeded 0.4 um (400 nm)
+	DoWindow/F $"Kaplan_Meier_Survival_Plot_400"		
+	if(i==1) // for first simulation set only (using the soft coupler)
+		RemoveFromGraph/all
+	endif	
+	appendtograph $("sim_survival_400_KM" + num2str(i)) vs timewave_1s
+	label bottom "Time [s]"
+	Label left "Fraction of MT pairs \rwith tips closer than 0.4 μm"
+	ModifyGraph grid=1
+	SetAxis left 0,1 // 0 to 1 survival probability
+	ModifyGraph lstyle($("sim_survival_400_KM" + num2str(i)))=3
+	ModifyGraph standoff=0
+	ModifyGraph fSize=8,font="Myriad Pro"
+	if(i==1)
+		ModifyGraph rgb(sim_survival_400_KM1)=(1,12815,52428)
+	endif
+	
+	// survival plot to show when tip separation has exceeded 0.6 um (600 nm)
+	DoWindow/F $"Kaplan_Meier_Survival_Plot_600"			
+	if(i==1) // for first simulation set only (using the soft coupler)
+		RemoveFromGraph/all
+	endif
+	appendtograph $("sim_survival_600_KM" + num2str(i)) vs timewave_1s
+	label bottom "Time [s]"
+	Label left "Fraction of MT pairs \rwith tips closer than 0.6 μm"
+	ModifyGraph grid=1
+	SetAxis left 0,1 // 0 to 1 survival probability
+	ModifyGraph lstyle($("sim_survival_600_KM" + num2str(i)))=3
+	ModifyGraph standoff=0
+	ModifyGraph fSize=8,font="Myriad Pro"
+	if(i==1)
+		ModifyGraph rgb(sim_survival_600_KM1)=(1,12815,52428) // blue for soft coupler
+	endif
+	
+	// survival plot to show when tip separation has exceeded 0.8 um (800 nm)
+	DoWindow/F $"Kaplan_Meier_Survival_Plot_800"
+	if(i==1) // for first simulation set only (using the soft coupler)
+		RemoveFromGraph/all
+	endif
+	appendtograph $("sim_survival_800_KM" + num2str(i)) vs timewave_1s
+	label bottom "Time [s]"
+	Label left "Fraction of MT pairs \rwith tips closer than 0.8 μm"
+	ModifyGraph grid=1
+	SetAxis left 0,1 // 0 to 1 survival probability
+	ModifyGraph lstyle($("sim_survival_800_KM" + num2str(i)))=3
+	ModifyGraph standoff=0
+	ModifyGraph fSize=8,font="Myriad Pro"
+	ModifyGraph width=324,height=158.4
+	if(i==1)
+		ModifyGraph rgb(sim_survival_800_KM1)=(1,12815,52428) // blue for soft coupler
+	endif
+		
+	// survival plot to show when tip separation has exceeded 1.2 um (1200 nm)
+	DoWindow/F $"Kaplan_Meier_Survival_Plot_1200"			
+	if(i==1) // for first simulation set only (using the soft coupler)
+		RemoveFromGraph/all
+	endif
+	appendtograph $("sim_survival_1200_KM" + num2str(i)) vs timewave_1s
+	label bottom "Time [s]"
+	Label left "Fraction of MT pairs \rwith tips closer than 1.2 μm"
+	ModifyGraph grid=1
+	SetAxis left 0,1 // 0 to 1 survival probability
+	ModifyGraph lstyle($("sim_survival_1200_KM" + num2str(i)))=3
+	ModifyGraph standoff=0
+	ModifyGraph fSize=8,font="Myriad Pro"
+	if(i==1)
+		ModifyGraph rgb(sim_survival_1200_KM1)=(1,12815,52428) // blue for soft coupler
+	endif
+
+end
+
+//-----------------------------------------------------------------------------------------------------------------------------------------
+// Display data from dual-trap experiments
+
+function display_invitro_data()
+	wave timewave_1s // data displayed for every 1s interval
+	// waves with in vitro survival data	
+	wave InVitro_survival_Soft_400,InVitro_survival_Soft_600,InVitro_survival_Soft_800,InVitro_survival_Soft_1200
+	wave InVitro_survival_Stiff_400,InVitro_survival_Stiff_600,InVitro_survival_Stiff_800,InVitro_survival_Stiff_1200
+	wave InVitro_survival_Soft_400_SEM,InVitro_survival_Soft_600_SEM,InVitro_survival_Soft_800_SEM,InVitro_survival_Soft_1200_SEM
+	wave InVitro_survival_Stiff_400_SEM,InVitro_survival_Stiff_600_SEM,InVitro_survival_Stiff_800_SEM
+		
+	// in vitro survival plot to show when tip separation has exceeded 0.4 um (400 nm)
+	DoWindow/F $"Kaplan_Meier_Survival_Plot_400"
+	appendtograph InVitro_survival_Soft_400,InVitro_survival_Stiff_400 vs timewave_1s
+	label bottom "Time [s]"
+	ModifyGraph grid=1
+	ModifyGraph rgb(InVitro_Survival_Soft_400)=(1,12815,52428)
+	ModifyGraph mode=6
+	ErrorBars InVitro_Survival_Soft_400 SHADE= {0,0,(0,0,0,0),(0,0,0,0)},wave=(InVitro_Survival_Soft_400_SEM,InVitro_Survival_Soft_400_SEM)	
+	ErrorBars InVitro_Survival_Stiff_400 SHADE= {0,0,(0,0,0,0),(0,0,0,0)},wave=(InVitro_Survival_Stiff_400_SEM,InVitro_Survival_Stiff_400_SEM)
+	
+	// in vitro survival plot to show when tip separation has exceeded 0.6 um (600 nm)	
+	DoWindow/F $"Kaplan_Meier_Survival_Plot_600"
+	appendtograph InVitro_survival_Soft_600,InVitro_survival_Stiff_600 vs timewave_1s
+	label bottom "Time [s]"
+	ModifyGraph grid=1
+	ModifyGraph rgb(InVitro_Survival_Soft_600)=(1,12815,52428)
+	ModifyGraph mode=6
+	ErrorBars InVitro_Survival_Soft_600 SHADE= {0,0,(0,0,0,0),(0,0,0,0)},wave=(InVitro_Survival_Soft_600_SEM,InVitro_Survival_Soft_600_SEM)	
+	ErrorBars InVitro_Survival_Stiff_600 SHADE= {0,0,(0,0,0,0),(0,0,0,0)},wave=(InVitro_Survival_Stiff_600_SEM,InVitro_Survival_Stiff_600_SEM)
+
+	// in vitro survival plot to show when tip separation has exceeded 0.8 um (800 nm)
+	DoWindow/F $"Kaplan_Meier_Survival_Plot_800"
+	appendtograph InVitro_survival_Soft_800,InVitro_survival_Stiff_800 vs timewave_1s
+	label bottom "Time [s]"
+	ModifyGraph grid=1
+	ModifyGraph rgb(InVitro_Survival_Soft_800)=(1,12815,52428)
+	ModifyGraph mode=6
+	ErrorBars InVitro_Survival_Soft_800 SHADE= {0,0,(0,0,0,0),(0,0,0,0)},wave=(InVitro_Survival_Soft_800_SEM,InVitro_Survival_Soft_800_SEM)
+	ErrorBars InVitro_Survival_Stiff_800 SHADE= {0,0,(0,0,0,0),(0,0,0,0)},wave=(InVitro_Survival_Stiff_800_SEM,InVitro_Survival_Stiff_800_SEM)
+	
+	// in vitro survival plot to show when tip separation has exceeded 1.2 um (1200 nm)
+	DoWindow/F $"Kaplan_Meier_Survival_Plot_1200"			
+	appendtograph InVitro_survival_Soft_1200,InVitro_survival_Stiff_1200 vs timewave_1s
+	label bottom "Time [s]"
+	ModifyGraph grid=1
+	ModifyGraph rgb(InVitro_Survival_Soft_1200)=(1,12815,52428)
+	ModifyGraph mode=6
+	ErrorBars InVitro_Survival_Soft_1200 SHADE= {0,0,(0,0,0,0),(0,0,0,0)},wave=(InVitro_Survival_Soft_1200_SEM,InVitro_Survival_Soft_1200_SEM)
+end
+
+//-----------------------------------------------------------------------------------------------------------------------------------------------
+// Scores the simulations by comparing survival scores and standard deviation of tip separation to in vitro data
+
+function score_model_survival()
+	wave soft_stdev_invitro,stiff_stdev_invitro 
+		// standard deviation of tip separation for soft and stiff couplers in vitro
+	wave avgd_1s_intervals_stdev1,avgd_1s_intervals_stdev2 
+		// standard deviation of tip separation for soft and stiff couplers in silico
+	wave InVitro_survival_Soft_400,InVitro_survival_Soft_600,InVitro_survival_Soft_800,InVitro_survival_Soft_1200 
+		// Survival scores for soft-coupled pairs in vitro
+	wave InVitro_survival_Stiff_400,InVitro_survival_Stiff_600,InVitro_survival_Stiff_800,InVitro_survival_Stiff_1200 
+		// Survival scores for stiff-coupled pairs in vitro
+	wave sim_survival_400_KM1,sim_survival_600_KM1,sim_survival_800_KM1,sim_survival_1200_KM1
+		// survival scores for soft-coupled pairs in silico
+	wave sim_survival_400_KM2,sim_survival_600_KM2,sim_survival_800_KM2,sim_survival_1200_KM2
+		// survival scores for stiff-coupled pairs in silico
+		
+	make/o/n=(1) model_score_wave,model_score_stdev_wave // final score waves to be displayed in control panel window
+	make/o/n=(4,2) model_score_matrix // survival plot scores
+	make/o/n=(2) model_score_stdev_matrix // standard deviation of tip separation scores
+	
+	// initialize
+	model_score_matrix = 0
+	model_score_stdev_matrix = 0
+	model_score_wave = 0
+	model_score_stdev_wave = 0
+	
+	variable i // counter
+	for(i=0;i<401;i++) // for each timepoint 0 to 400 seconds with 1 second intervals
+		// score survival plots
+		model_score_matrix[0][0] += (InVitro_survival_Soft_400[i] - sim_survival_400_KM1[i])^2
+		model_score_matrix[1][0] += (InVitro_survival_Soft_600[i] - sim_survival_600_KM1[i])^2
+		model_score_matrix[2][0] += (InVitro_survival_Soft_800[i] - sim_survival_800_KM1[i])^2
+		model_score_matrix[3][0] += (InVitro_survival_Soft_1200[i] - sim_survival_1200_KM1[i])^2
+		model_score_matrix[0][1] += (InVitro_survival_Stiff_400[i] - sim_survival_400_KM2[i])^2
+		model_score_matrix[1][1] += (InVitro_survival_Stiff_600[i] - sim_survival_600_KM2[i])^2
+		model_score_matrix[2][1] += (InVitro_survival_Stiff_800[i] - sim_survival_800_KM2[i])^2
+		model_score_matrix[3][1] += (InVitro_survival_Stiff_1200[i] - sim_survival_1200_KM2[i])^2	
+			
+		// score standard deviation of tip separation
+		model_score_stdev_matrix[0] += (soft_stdev_invitro[i] - avgd_1s_intervals_stdev1[i])^2
+		model_score_stdev_matrix[1] += (stiff_stdev_invitro[i] - avgd_1s_intervals_stdev2[i])^2
+	
+	endfor
+	
+	// sum the scores separately from survival plots and standard deviation of tip separation
+	model_score_wave = sum(model_score_matrix)
+	model_score_stdev_wave = sum(model_score_stdev_matrix)
+end
+
+//---------------------------------------------------------------------------------------------------------------------------------------//
+// this function creates all the waves needed for the kpsim function below
+// It also sets the "intrinsic" assembly velocity for each tip
+// These assembly velocities, rate parameters, and force sensitivities are from Akiyoshi et al., 2010
+
+function kpsim_initialize(tott,maxstep,N)
+  variable tott // maximum time per simulation [s]
+  variable maxstep // maximum step size allowed [s]
+  variable N // Number of parallel MTs
+  variable maxit = 100*round(tott/maxstep) // maximum allowed number of total steps
+  variable i // counter
+  
+  wave w,o // parameter and simulation conditions waves
+  wave vrun_2s,Force_vrun_2s // growth speeds and corresponding forces as measured in Akiyoshi et al., 2010
+  
+  variable different_velocities = o[4] // boolean to allow assembling MTs to have different velocities
+  variable different_dvelocities = o[6] // boolean to allow disassembling MTs to have different velocities
+  variable unloaded_gvel = w[4] // unloaded average growth velocity [nm/s]
+  variable unloaded_svel = w[6] // unloaded average shortening velocity [nm/s]
+    
+  make/o/n=(N) va_intrinsic,vd_intrinsic
+  // unloaded assembly/disassembly velocity for each MT
+  make/o/n=(maxit,N) xp,ap,vp,tp,force
+  	// positions, assembly state (assembly = 1, disassembly = 2), velocities, time, and force for each MT
+  make/o/n=(N) cxp,cap,cforce,ctp,cvp // current MT x-positions, states, forces, times, and velocities
+  make/o/n=(1) endpoint, endtime, last_end_event 
+  		// (endtime, endpoint) is the (x,t) where/when the simulation ended
+  		// last_end_event records the most recent end event type (state switch, detach, or 'other')
+  make/o/n=(N,2) g_rate 
+  		// rate of switch and detach for each MT for gillespie algorithm
+  make/o/n=(numpnts(vrun_2s)) vrun_unloaded // unloaded (zero-force) growth speeds for pause model
+  make/o/n=(maxit) distances // wave to hold each MT separation distance
+
+  // set initial conditions for each MT tip
+  for(i=0;i<N;i++) // for each MT
+    xp[0][i] = 0 // MTs at the same starting point (defined as x = 0 [um]) 
+    tp[0][i] = 0 // start at time = 0 [s]
+    ap[0][i] = 1 // MTs are all assembling
+    if(o[16] == 1) // pausing on
+    	vp[0][i] = 8.7/1000 // faster speed because assumed starting unpaused
+    else
+    	vp[0][i] = unloaded_gvel/1000 // MT assembling at average unloaded growth velocity [um/s]
+    endif
+    force[0][i] = 0 // all tips start without tension [pN]
+  endfor
+  
+  // Calculate vrun_unloaded for user-input force sensitivity (pause model only)
+  vrun_unloaded = vrun_2s/exp(Force_vrun_2s/w[24]) // extrapolate unloaded growth speeds from loaded growth speeds for growth speeds during runs
+  
+  // if MTs are non-ergodic
+  if(different_velocities == 1)
+  	// allow each MT to have a different unloaded assembly velocity
+	avelocity_choose_v3(N) 
+  	for(i=0;i<N;i++) // for each MT
+  		vp[0][i]=va_intrinsic[i]/1000     
+  			// set the initial velocity to the unloaded velocities [um/s] since this is the moment just before force application
+  	endfor
+ 
+  // make position vs time graph skeleton
+  doWindow/k/z x_vs_t // kill the position vs time window if present but plz no bitching if not
+  display // new window
+  for(i=0;i<N;i++)
+  	appendtograph xp[][i] vs tp[][i]
+  endfor
+  label bottom "Time [s]"
+  label left "Tip position [µm]"
+  ModifyGraph fSize=8,font="Myriad Pro"
+  SetAxis left *,3.5
+  ModifyGraph manTick(left)={0,1,0,0},manMinor(left)={0,0}
+  ModifyGraph manTick(left)={0,1,0,0},manMinor(left)={1,0}
+  ModifyGraph width=180,height=162.72
+  doWindow/C $("x_vs_t")
+  endif	
+end
+//------------------------------------------------------------------------------------
+// This function does Monte Carlo simulation of N MTs in a "parallel" arrangement.
+// It uses the Gillespie algorithm to pick a reaction and a reaction time based
+// on their relative hazard rates, which are in turn dependent on the applied force.
+// The user inputs total time to be simulated per trace, maximum timestep size,
+// and number of MTs being simulated.
+// The function outputs each tip position, force, velocity, and direction over time in waves.
+// It also outputs information about how the simulation ends, which is saved in the
+// last_end_event wave and appended to the x_vs_t graph.
+// These assembly velocities, rate parameters, and force sensitivities are from
+// the 2010 Akiyoshi paper.
+
+function kpsim(tott,maxstep,N)
+  variable tott // total amount of time per trace [s]
+  variable maxstep // maximum timestep [s] to prevent force (and thus hazard rate) from evolving too much in one timestep
+  variable N // number of parallel MTs
+  variable maxit = 100*round(tott/maxstep) // maximum number of allowed iterations
+  variable i = 1 // counter
+  variable j // counter that says which MT is being simulated
+  variable done = 0 
+  		// boolean to indicate whether to stop simulation (ex: if detach occurs)
+  variable timestep // Chosen with Gillespie algorithm unless chosen timestep exceeds maxstep
+  variable endtip // which MT ended the simulation
+  variable g_total // sum of event (hazard) rates for all tips
+
+  wave w,o // parameter and simulation options waves
+  wave xp,ap,vp,tp,force // position, state of assembly/disassembly, velocity, time, and force
+  wave cxp,cap,cforce,ctp,cvp // waves to hold state of the system at current timepoint
+  wave endpoint, endtime // waves with endpoint and corresponding time
+  wave last_end_event // tells whether the run has ended because of catastrophe (0),
+  							// rescue (1), detachment during assembly (2) or disassembly (3),
+  							// or crap falling in the trap (5)
+  wave va_intrinsic,vd_intrinsic
+  		// waves containing unloaded assembly and disassembly velocities for each MT [nm/s]
+  wave g_rate // hazard/event rate of switch and detach for each tip
+  wave distances // tip separation between MT pairs if N = 2
+  
+  make/o/n=(N) start_pause // booleans indicating whether each tip is currently in a pause state
+  make/o/n=(N) pause_start_time // time of most recent pause start
+  pause_start_time = 0
+  start_pause = 0
+  
+  	 // rates for gillespie
+  variable pick_a_tip // which tip 'reacted' (random number)
+  variable any_tip // this tip did it
+  variable dummy // dummy variable
+  variable pause_now //boolean to say if the MT is in a pause state or not
+  
+  // sets options and parameters from o and w waves
+  variable single_state = o[1] 
+  		// boolean that says whether MT state switches end the simulation
+  variable different_velocities = o[4] 
+  		// boolean that allows MTs to have different assembly velocities
+  variable different_dvelocities = o[6] 
+  		// boolean that allows MTs to have different disassembly velocities
+  variable detach_on = o[7] // boolean that allows MTs to detach
+  variable switch_on = o[9]
+  		// boolean that enables switching from/to assembly/disassembly
+  variable pausing_on = o[16]
+  variable trap_crap = o[18]
+    
+  removefromgraph /W=x_vs_t /Z endpoint // remove the endpoint from the last run
+  		// /Z makes it not get fussy if the point doesn't exist
+  do
+    // update system state
+    for(j=0;j<N;j++) // for each MT
+      cxp[j]=xp[i-1][j] // current x-position
+      cap[j]=ap[i-1][j] // current direction
+      ctp[j]=tp[i-1][j] // current time
+      cvp[j]=vp[i-1][j] // current velocity
+    endfor
+    
+    // calculate force on each tip based on current system state
+    pforce1(N) // Puts force values in the cforce wave based on parallel MT model
+        
+    g_total = 0 // initialize total event rate
+    make/o/n=(N) g_pause,g_run
+    variable g_crap
+    
+    if(trap_crap == 0)
+    	g_crap = 0
+    else
+    	g_crap = .0005655 // s^-1, from rotha fit in Akiyoshi et al.
+    endif
+    
+    if(pausing_on == 0)
+    	g_pause = 0
+    	g_run = 0
+    else
+    	for(j=0;j<N;j++)
+    		if(cvp[j] == 0 && ctp[j]!=0) // pause state
+    			g_pause[j] = 0
+    			g_run[j] = exp(cforce[j]/w[23])*w[21]/ 3600 // pause exit rate in s^-1
+    		else // run state
+    			g_pause[j] = exp(cforce[j]/w[22])*w[20] / 3600 // pause rate in s^-1
+    			g_run[j] = 0
+    		endif
+    	endfor
+    endif
+    
+    for(j=0;j<N;j++)
+    	if(cap[j] == 1) // MT is assembling
+    		g_rate[j][0] = Wdeta(cforce[j])// detach rate for this tip
+    		g_rate[j][1] = Wc(cforce[j]) // switch rate for this tip
+    	else // MT is disassembling
+    		g_rate[j][0] = Wdetd(cforce[j]) // detach rate for this tip
+    		g_rate[j][1] = Wr(cforce[j]) // switch rate for this tip
+    	endif
+    	if(detach_on == 1 && switch_on == 1)
+    		g_total += g_rate[j][0] + g_rate[j][1]
+    	elseif(switch_on == 0 && detach_on == 1) // if switching is turned off
+    		g_total += g_rate[j][0] // only add the detach rate to the total rate
+    	elseif(detach_on == 0 && switch_on == 1) // if detach is turned off
+    	   g_total += g_rate[j][1] // only add switch rate to the total rate
+    	endif
+    	g_total += g_crap
+  		g_total += g_pause[j] // g_pause is 0 if pausing is off
+  		g_total += g_run[j] // g_run is 0 if pausing is off
+    	  	// add sum of event rates for this tip to total event rate
+    	  	// only add one rate if either detach or switch are disabled
+    endfor
+    
+    timestep = -ln(abs(enoise(1)))/g_total 
+        // timestep chosen from integral of cumulative distribution function at the current force values
+    any_tip = N+1 // impossible tip number for the parallel case
+    	// set in case nothing happens because timestep > maxstep
+    	// also to prevent the previous any_tip from prematurely breaking the for loop
+    if(timestep > maxstep || (switch_on == 0 && detach_on == 0 && pausing_on == 0 && trap_crap == 0)) 
+        		// timestep exceeds the maxstep set by the user or stochastic end events have been disabled
+    	timestep = maxstep 
+          	// I set this in case the timestep chosen with Gillespie made v and x so different that the force was greatly altered
+    else // figure out which tip made a change
+    	pick_a_tip = abs(enoise(1))
+    	dummy = 0 // keeps track of what number you were at on the uniform distribution from the previous tip
+    	for(j=0;j<N;j++)
+    		if(switch_on == 1 && detach_on == 1)
+      		if(pick_a_tip<(((g_rate[j][0] + g_rate[j][1] + g_pause[j] + g_crap +g_run[j]) / g_total) + dummy))
+      			// if the number chosen corresponds with this tip's section of the uniform distribution
+      			any_tip = j
+      		else
+      			dummy += (g_rate[j][0] + g_rate[j][1] + g_pause[j] + g_crap + g_run[j])/g_total
+      		endif
+      	elseif(detach_on == 0 && switch_on == 1) // if detach has been turned off but switching is on
+      		if(pick_a_tip<((g_rate[j][1] + g_pause[j] + g_crap + g_run[j])/ g_total + dummy))
+      			// if the number chosen corresponds with this tip's section of the uniform distribution
+      			any_tip = j
+      		else
+      			dummy += (g_rate[j][1] + g_pause[j] + g_crap + g_run[j])/g_total
+      		endif
+      	elseif(detach_on == 1 && switch_on == 0) // switch is off but detach is on
+      		if(pick_a_tip<((g_rate[j][0] + g_pause[j] + g_crap + g_run[j]) / g_total + dummy))
+      			// if the number chosen corresponds with this tip's section of the uniform distribution
+      			any_tip = j
+      		else
+      			dummy += (g_rate[j][0] + g_pause[j] + g_crap + g_run[j])/g_total
+      		endif
+      	elseif(pausing_on == 1)
+      		if(pick_a_tip<((g_pause[j] + g_crap + g_run[j])/g_total + dummy))
+      			any_tip = j
+      		else
+      			dummy += (g_pause[j]+g_crap+g_run[j])/g_total
+      		endif
+      	elseif(trap_crap == 1)
+      		if(pick_a_tip < ((g_crap + g_run[j])/g_total + dummy))
+      			any_tip = j
+      		else
+      			dummy += (g_crap + g_run[j])/g_total
+      		endif
+      	endif
+      	
+      	if(any_tip == j) // once a new tip has been picked
+      		break // stop checking tips to find any_tip
+      		// break the cycle man
+      	endif	
+		endfor
+    endif
+    
+    // compute changes to MT velocity and position based on current force
+    for(j=0;j<N;j++) // for each MT tip
+      force[i][j] = cforce[j] // Update force      	
+    	// update velocity based on force and position based on velocity
+      if(cap[j] == 1) // MT was assembling
+      	if(different_velocities == 1 || pausing_on == 1) // choose assembly velocities from Akiyoshi distribution
+      		// calculate velocity based on chosen unloaded assembly velocity of MT j and exponential dependence on force
+      	  	if(o[20] == 0 && pausing_on == 0)
+      	  		// use OG force dependence model
+      	  		vp[i][j] = va_intrinsic[j]*exp(cforce[j]/w[5])/1000	
+  			elseif(start_pause[j] == 0 && pausing_on == 1) // pausing is on and MT is in run
+  				if(o[4] == 1) // each MT has its own growth speed
+  					vp[i][j] = va_intrinsic[j]*exp(cforce[j]/w[24])/1000
+  				else // each MT has the same growth speed at the same force
+  					vp[i][j] = 8.7*exp(cforce[j]/w[24])/1000
+  				endif
+  			elseif(pausing_on == 1 && start_pause[j] == 1) // MT is in pause
+  				vp[i][j] = 0
+  			endif
+      	else // use average MT growth velocity extrapolated to current force
+      		vp[i][j] = U(cforce[j])
+      	endif		
+      else // MT was disassembling
+      	if(different_dvelocities == 1)
+         	// calculate disassembly velocity based on chosen unloaded velocity of MT j and exponential dependence on force
+      		vp[i][j] = vd_intrinsic[j]*exp(cforce[j]/w[7])/1000
+      	else // use average MT shortening velocity extrapolated to current force
+        		vp[i][j]=-V(cforce[j]) // update velocity with current force      	
+      	endif
+      endif
+      
+      xp[i][j]=cxp[j]+vp[i][j]*timestep // update position using new velocity      
+      tp[i][j]=ctp[j]+timestep // update time
+    
+    // based on system state, pick a reaction using Gillespie algorithm
+    // only if this tip was chosen to react!   
+    // otherwise just updates direction
+       if(any_tip != j) // checks if this tip was chosen to react     
+          ap[i][j] = ap[i-1][j] // No reaction occurs
+          variable reaction_type = abs(enoise(1))
+          
+       elseif(reaction_type<(g_rate[j][0]/(g_rate[j][0] + g_rate[j][1] + g_pause[j] + g_crap + g_run[j])) && detach_on == 1)
+          // pick a reaction with Gillespie algorithm (detach or catastrophe)
+          // detach rate is g_rate[][0], switch rate is g_rate[][1]
+          done = 1 // end simulation
+          endtip = j // MT j detached
+          if(cap[j] == 1) // if MT was assembling
+          	last_end_event = 2 // end event is detachment during assembly
+          else // MT was disassembling
+          	last_end_event = 3 // end event is detachment during disassembly
+       	 endif
+       	 ap[i][j] = ap[i-1][j] // just to fill the ap table out idk
+       elseif(reaction_type<((g_rate[j][1] + g_rate[j][0])/(g_rate[j][0] + g_rate[j][1] + g_pause[j] + g_crap + g_run[j])) && switch_on == 1)
+       // Reaction chosen with Gillespie algorithm is a switch
+          if(cap[j] == 1) // MT was assembling so event is catastrophe
+          	ap[i][j] = 0  // MT switches to disassembly
+          else // MT was disassembling so event was rescue
+          	ap[i][j] = 1 // MT switches to assembly
+          endif
+          if(single_state == 1) // catastrophes end the simulation in single-state experiments
+          	if(cap[j] == 1) // MT was assembling
+          		last_end_event = 0 // end event is catastrophe
+          	else // MT was disassembling
+          		last_end_event = 1 // end event is rescue
+          	endif
+          	done = 1 // end the simulation
+          	endtip = j // MT j switched
+          endif
+        elseif(reaction_type < ((g_rate[j][1] + g_rate[j][0] + g_pause[j])/(g_rate[j][0] + g_rate[j][1] + g_pause[j] + g_crap + g_run[j]))) // reaction is pause
+        		start_pause[j] = 1
+        		ap[i][j] = ap[i-1][j] // same direction as before
+        		vp[i][j] = 0
+        elseif(reaction_type < ((g_rate[j][1] + g_rate[j][0] + g_pause[j] + g_crap)/(g_rate[j][0] + g_rate[j][1] + g_pause[j] + g_crap + g_run[j])))
+         // reaction is crap in the trap
+        		done = 1
+        		endtip = j
+        		last_end_event[0] = 5
+        else // reaction is to exit from pause
+        		ap[i][j] = ap[i-1][j] // same direction as before
+        		start_pause[j] = 0 // no longer in pause state
+        endif      
+      if(done == 1) // label the end the simulation if it happened
+        endpoint = xp[i][endtip] // simulation ended at this x-position
+        endtime = tp[i][endtip] // simulation ended at this time
+      endif
+    endfor
+    
+    i+=1 // increase counter by 1 for next timestep
+    
+    variable current_time_for_realz = tp[(i-1)][0]
+    
+  while(current_time_for_realz < tott && done == 0)  // quits when first MT is past the total time or an "end event" occurs
+  
+// Draw a point on the graph describing where, when, and what the end event was
+  if((done == 1 && single_state == 0) || last_end_event[0] == 2 || last_end_event[0] == 3) // MT detached
+    appendtograph /W=x_vs_t /C=(0,65535,0),endpoint vs endtime // green for detachment
+  elseif(single_state == 1) // MT switched states
+    appendtograph /W=x_vs_t /C=(0,0,65535),endpoint vs endtime // blue for state switch
+  elseif(last_end_event[0] == 5) // black for crap in trap
+  	appendtograph /W=x_vs_t /C=(0,0,0), endpoint vs endtime
+  endif
+  ModifyGraph /Z/W=x_vs_t mode(endpoint)=2,lsize(endpoint)=10 // make the endpoint bigger and a dot
+
+  
+  // delete unfilled entries if the simulation ended earlier than the specified maximum runtime
+  
+  deletepoints i,(maxit-i),xp
+  deletepoints i,(maxit-i),tp
+  deletepoints i,(maxit-i),ap
+  deletepoints i,(maxit-i),vp
+  deletepoints i,(maxit-i),force
+  deletepoints i,(maxit-i),distances
+end
+
+//--------------------------------------------------------------------------------------------------------------------------------------------//
+// function runs kpsim (above) multiple times to get statistics
+
+function kpsim_rep(tott,maxstep,num,N)
+  variable tott // total amount of time (in seconds) per trace
+  variable num // number of times to repeat kpsim
+  variable maxstep // maximum allowed step size 
+  variable N // number of parallel MTs
+  variable maxit = 100*round(tott/maxstep) // maximum number of iterations per simulation
+  wave xp,vp,tp,force // position, velocity, time, and force for each MT
+  variable i,j // counters
+  wave o,w // wave with simulation conditions
+  wave endpoint // time/position of ending
+  wave distances // tip separation between an MT pair if N = 2
+     
+  // dummy wave for storing tip separations (avgd_0, avgd_1, ...) at 0, 1, ... seconds
+  make/o/n=(num) avgd_dummy
+  avgd_dummy = 0
+  for(i=0;i<401;i++) // 400 seconds
+    duplicate/O avgd_dummy,$("avgd_" + num2str(i))	
+  endfor
+
+  for(i=0;i<num;i++) // for each simulation
+    kpsim_initialize(tott,maxstep,N) // create waves to store simulation information and choose intrinsic velocities
+    kpsim(tott,maxstep,N) // runs one sim
+    
+    // calculates and stores tip separations at 1s intervals
+    if(N == 2) // 2 MTs
+    	for(j=0;j<numpnts(distances);j++) // for each timepoint
+    		distances[j]= abs(xp[j][0]-xp[j][1]) 
+    		// separation distance between tips is the difference in their positions
+    	endfor
+
+    	for(j=0;j<401;j++) // 400 seconds of growth
+      		duplicate/O $("avgd_" + num2str(j)),avgd_dummy // copy current set of tip separations at the jth second into dummy wave
+    		if(wavemax(tp) >= j) // if the jth timepoint does not exceed simulation time
+    			avgd_dummy[i] = distances[x2pnt(tp,j)] // add a new data point to the tip separation wave
+    		else
+    			avgd_dummy[i] = Nan
+    		endif
+    		duplicate/o avgd_dummy,$("avgd_" + num2str(j)) // copy dummy wave back into wave of tip separations at the jth second
+    	endfor    
+    endif   
+  endfor
+  
+  consolidate_avgd()
+  matrixify_avgd(num) // format tip separations into a matrix for easier looping
+  
+end
+//-----------------------------------------------
+function consolidate_avgd()
+
+	wave avgd_dummy
+	make/o/n=(401) avgd_1s_intervals,avgd_1s_intervals_SEM,avgd_1s_intervals_stdev
+	variable V_avg,V_sem,V_sdev
+	variable i
+	
+	
+	for(i=0;i<401;i++)
+		duplicate/o $("avgd_" + num2str(i)),avgd_dummy
+		wavestats avgd_dummy
+		avgd_1s_intervals[i] = V_avg
+		avgd_1s_intervals_SEM[i] = V_sem
+		avgd_1s_intervals_stdev[i] = V_sdev
+	endfor
+	
+end
+
+//-------------------------------------------------------------------------------------------------------------------------
+//
+
+function survival_plot_sim()
+	variable i,j,k
+	
+	wave avgd_matrix
+	
+	make/o/n=(401) sim_survival_400,sim_survival_600,sim_survival_800,sim_survival_1200
+	make/o/n=(401) sim_survival_400_KM,sim_survival_600_KM,sim_survival_800_KM,sim_survival_1200_KM
+	make/o/n=(401) death_count_400,death_count_600,death_count_800,death_count_1200
+	make/o/n=(4) end_flag // flag to indicate the tips have already exceeded a certain separation
+		// 0 = not yet ended, 1 = ended by tip separation, 2 = ended because of something else
+		
+	// initialize	
+	sim_survival_400 = 0
+	sim_survival_600 = 0
+	sim_survival_800 = 0
+	sim_survival_1200 = 0
+	
+	sim_survival_400_KM = 0
+	sim_survival_600_KM = 0
+	sim_survival_800_KM = 0
+	sim_survival_1200_KM = 0
+	
+	death_count_400 = 0
+	death_count_600 = 0
+	death_count_800 = 0
+	death_count_1200 = 0
+	
+	for(i=0;i<dimsize(avgd_matrix,1);i++) // for each MT pair
+		end_flag = 0
+		for(j=0;j<dimsize(avgd_matrix,0);j++) // for each 1s interval
+			if(numtype(avgd_matrix[j][i]) == 2) 
+			// event ended from a stochastic event before it exceeded the given tip separation
+				for(k=0;k<4;k++)
+					if(end_flag[k] == 0)
+						end_flag[k] = 2
+					endif
+				endfor
+				break
+			endif
+			if(avgd_matrix[j][i] < 1.2 && end_flag[3] == 0)
+				sim_survival_1200[j] += 1
+				sim_survival_1200_KM[j] += 1
+			elseif(end_flag[3] == 0)
+				death_count_1200[j] += 1
+				end_flag[3] = 1
+			endif
+			if(avgd_matrix[j][i] < .8 && end_flag[2] == 0)
+				sim_survival_800[j] += 1
+				sim_survival_800_KM[j] += 1
+			elseif(end_flag[2] == 0)
+				death_count_800[j] += 1
+				end_flag[2] = 1
+			endif
+			if(avgd_matrix[j][i] < .6 && end_flag[1] == 0)
+				sim_survival_600[j] += 1
+				sim_survival_600_KM[j] += 1
+			elseif(end_flag[1] == 0)
+				death_count_600[j] += 1
+				end_flag[1] = 1
+			endif
+			if(avgd_matrix[j][i] < .4 && end_flag[0] == 0)
+				sim_survival_400[j] += 1
+				sim_survival_400_KM[j] += 1
+			elseif(end_flag[0] == 0)
+				death_count_400[j] += 1
+				end_flag[0] = 1
+			endif
+		endfor
+	endfor
+	
+	
+	// 0s tip separation
+	sim_survival_400_KM[0] /= dimsize(avgd_matrix,1) // divide by number of tip seps
+	sim_survival_600_KM[0] /= dimsize(avgd_matrix,1)
+	sim_survival_800_KM[0] /= dimsize(avgd_matrix,1)
+	sim_survival_1200_KM[0] /= dimsize(avgd_matrix,1)
+	
+	
+	// calculate kaplan meier survival probabilities
+	for(i=1;i<401;i++)
+		if((sim_survival_400[i] + death_count_400[i]) != 0) // don't divide by 0
+			sim_survival_400_KM[i] = sim_survival_400_KM[i-1]*(sim_survival_400[i]/(sim_survival_400[i]+death_count_400[i]))
+		else
+			sim_survival_400_KM[i] = 0
+		endif
+		if((sim_survival_600[i] + death_count_600[i]) != 0) // don't divide by 0
+			sim_survival_600_KM[i] = sim_survival_600_KM[i-1]*(sim_survival_600[i]/(sim_survival_600[i]+death_count_600[i]))
+		else
+			sim_survival_600_KM[i] = 0
+		endif
+		if((sim_survival_800[i] + death_count_800[i]) != 0) // don't divide by 0
+			sim_survival_800_KM[i] = sim_survival_800_KM[i-1]*(sim_survival_800[i]/(sim_survival_800[i]+death_count_800[i]))
+		else
+			sim_survival_800_KM[i] = 0
+		endif
+		if((sim_survival_1200[i] + death_count_1200[i]) != 0) // don't divide by 0
+			sim_survival_1200_KM[i] = sim_survival_1200_KM[i-1]*(sim_survival_1200[i]/(sim_survival_1200[i]+death_count_1200[i]))
+		else
+			sim_survival_1200_KM[i] = 0
+		endif
+	endfor
+end
+
+function matrixify_avgd(num)
+	variable num	// number of sims
+	wave avgd_dummy
+	variable i,j
+	make/o/n=(401,num) avgd_matrix
+		
+	for(i=0;i<num;i++)
+		for(j=0;j<401;j++)
+			duplicate/o $("avgd_" + num2str(j)),avgd_dummy
+			avgd_matrix[j][i] = avgd_dummy[i]
+		endfor
+	endfor
+end
+//-------------------------------------------------------------------------------------------------
+// First, unloaded velocities are calculated by dividing loaded velocities by the exponentials 
+// that describe how velocity changes in response to force, exp(F/Fs), where F is the average 
+// force of the corresponding force bins and Fs is the force-sensitivity of velocity.
+// Next, this method removes velocities that are outlier-ish-ly large.
+// Next, for each MT, an index is chosen at random from a uniform distribution with range equal to
+// the number of velocity measurements. The chosen index corresponds to the unloaded velocity that
+// will be the MT's "intrinsic" assembly speed.
+// This method no longer assumes that the data is gaussian.
+function avelocity_choose_v3(N)
+	variable N // N MTs
+	wave w,o // parameter wave
+	wave unloaded_velocities
+	 // measured forces and corresponding MT assembly velocities from Akiyoshi et al 2010
+	wave va_intrinsic // intrinsic unloaded assembly velocity
+	variable index // index of chosen velocity
+	variable i // counter
+	variable Fg = w[5] // force sensitivity of growth velocity
+			
+	// Calculates all unloaded velocities based on the Akiyoshi data
+	if(o[16] == 0)
+		unloaded_velocity_distribution()
+	else // o[16] == 1
+		unloaded_velocity_distribution_v3()
+	endif
+	
+	remove_large_v()
+	
+	variable Nv =  dimsize(unloaded_velocities,0) // number of velocities in Akiyoshi paper table
+	
+	// Choose velocity from the table at random
+	for(i=0;i<N;i++) // for each MT
+		index = abs(round(enoise(Nv)))
+		if(index == Nv) // if the index is the number of velocities
+			index = 0 
+				// corrects for 0th index having half the probability of being picked compared to other indices
+				// Since there is no measurement the length of the vector (since indexing starts at 0),
+				// if the random number was rounded to the total number of velocities, this
+				// makes the index 0, which is only half as likely to be picked since it can only 
+				// be reached by rounding down, evening the probability for each index
+		endif
+		va_intrinsic[i] = unloaded_velocities[index]
+			// gets the unloaded velocity at the chosen index
+	endfor
+end
+
+//-------------------------------------------------------------------------------------------
+// This method creates a wave and a corresponding histogram with all unloaded velocities extrapolated
+// from loaded velocities measured in the 2010 Akiyoshi paper.
+// Unloaded velocities are calculated by dividing loaded velocities by the exponentials 
+// that describe how velocity changes in response to force, exp(F/Fs), where F is the average 
+// force of the corresponding force bins and Fs is the force-sensitivity of velocity.
+
+function unloaded_velocity_distribution()
+	variable i // counter
+	wave w // parameter wave
+	variable Fg = w[5] // force senstivity of growth velocity
+	wave force_velocity_table_akiyoshi // measured velocities under load
+	make/o/n=(dimsize(force_velocity_table_akiyoshi,0)) unloaded_velocities,unloaded_velocities_hist
+	for(i=0;i<numpnts(unloaded_velocities);i++) // for each measured velocity
+		unloaded_velocities[i] = force_velocity_table_akiyoshi[i][1] // loaded velocities from Akiyoshi
+		unloaded_velocities[i] = unloaded_velocities[i]/exp(force_velocity_table_akiyoshi[i][0]/Fg)
+			// conversion from loaded to unloaded velocities using forces and force sensitivities
+	endfor
+	histogram /B={0,1,50} unloaded_velocities,unloaded_velocities_hist
+		// Makes a histogram wave with 50 bins of size 1 nanometer per second
+end
+//-----------------------------------------------------
+function unloaded_velocity_distribution_v3()
+	variable i // counter
+	wave w // parameter wave
+	wave vrun_unloaded // vrun extrapolated to unloaded
+	
+	make/o/n=(numpnts(vrun_unloaded)) unloaded_velocities
+	make/o/n=(50) unloaded_velocities_hist
+	
+	for(i=0;i<numpnts(unloaded_velocities);i++) // for each measured velocity
+		unloaded_velocities[i] = vrun_unloaded[i]
+			// conversion from loaded to unloaded velocities using forces and force sensitivities
+	endfor
+	histogram /B={0,1,50} unloaded_velocities,unloaded_velocities_hist
+		// Makes a histogram wave with 50 bins of size 1 nanometer per second
+end
+
+//--------------------------------------------------------------------------------------------------
+// This function removes velocities that are larger than 30 nm/s, since they are outliers we don't see in dual-trap experiments
+
+function remove_large_v()
+	variable i // counter
+	wave unloaded_velocities
+		// velocities from Akiyoshi 2010 extrapolated from loaded to unloaded using the functions above.
+	for(i=0;i<numpnts(unloaded_velocities);i++) // for each velocity measurement
+		if(unloaded_velocities[i]>30) // if the unloaded velocity at this index is bigger than blah
+			deletepoints i,1,unloaded_velocities // delete the velocity at this index
+			i = i-1
+		endif
+	endfor
+end
+//------------------------------------------------------------------------------------------
+// 'rescue' probability (i.e. probability for a P-to-AP transition)
+function Wr(F)
+  variable F // tensile force transmitted between sister KTs through chromatin
+  variable comp1 // dummy variable
+  wave w,o // holds needed values as indicated below
+
+  variable kno = w[0] // unloaded rescue rate [1/hr]
+  variable Fn = w[1] // force required for e-fold change [pN]
+  comp1 = kno * exp(F/Fn) / 3600 // expected number of rescues [1/s]
+  return comp1 
+end
+//---------------------------------------------------------------------------------------------------------------------------------------//
+// 'catastrophe' probability (i.e. probability for a AP-to-P transition)
+function Wc(F)
+  variable F // tensile force transmitted between sister KTs through chromatin
+  variable comp1 // dummy variable
+  wave w,o // holds needed values as indicated below
+  variable kno = w[2] // unloaded catastrophe rate [1/hr]
+  variable Fn = w[3] // force required for e-fold change [pN]
+  	
+  comp1 = kno * exp(F/Fn) / 3600 // expected number of catastrophes per s [1/s]
+  return comp1 
+end
+//---------------------------------------------------------------------------------------------------------------------------------------//
+// 'growth' speed (i.e., speed of AP movement)
+function U(F)
+  variable F // tensile force transmitted between sister KTs through chromatin
+  variable comp1 // dummy variable
+  wave w,o // holds needed values as indicated below
+
+  variable kno = w[4] // unloaded growth speed [nm/s]
+  variable Fn = w[5] // force required for e-fold change [pN]
+  
+  comp1 = kno * exp(F/Fn) / 1000 // growth speed in units of [um/s]
+  return comp1
+end
+//-----------------------------------------------------
+function Wdeta(F)
+  variable F // tensile force
+  variable rate // rate of detachment during assembly
+  wave w
+  variable ko_a = w[11] // unloaded detachment rate during assembly
+  variable Fa = w[12] // force required for an e-fold change [pN]
+  
+  rate = ko_a * exp(F/Fa) / 3600 // expected rate of detachment per s
+  return rate
+end
+//-----------------------------------------------------
+function Wdetd(F)
+  variable F // tensile force
+  variable rate // rate of detachment during assembly
+  wave w
+  variable ko_d = w[13] // unloaded detachment rate during disassembly
+  variable Fd = w[14] // force required for an e-fold change [pN]
+  
+  rate = ko_d * exp(F/Fd) / 3600 // expected rate of detachment per s
+  return rate
+end
+//---------------------------------------------------------------------------------------------------------------------------------------//
+// 'shortening' speed (i.e., speed of P movement)
+function V(F)
+  variable F // tensile force transmitted between sister KTs through chromatin
+  variable comp1 // dummy variable
+  wave w,o // holds needed values as indicated below
+     
+  variable kno = w[6] // unloaded shortening speed [nm/s]
+  variable Fn = w[7] // force required for an e-fold change [pN]
+  comp1 = kno * exp(F/Fn) / 1000 // shortening speed in units of [um/s]
+  return comp1
+end
+
+//-----------------------------------------------------------------
+// force (tension) on 1st tip for the case of N parallel MTs
+function pforce1(N)
+  variable N // number of parallel MTs
+  wave w,o // holds needed values as indicated below
+  wave cforce // Tensile force on each MT
+  wave cxp,cvp // positions [um] and velocities [um/s] for all parallel MTs
+
+  variable k = w[8] // spring constant [pN/um]  
+  variable gama = w[9] // damping constant [pN*s/um]
+  variable F_tot = w[10] // total force shared across the two MTs [pN] 
+  variable i
+  variable gama2 = w[19] // viscous drag coefficient [pN*s/um]
+   
+  for(i=0;i<N;i++)
+    cforce[i] = (F_tot + k*(sum(cxp)-N*cxp[i]))/N// Force on MT  
+    if(o[12] == 1)
+    	cforce[i] -= gama2/N*mean(cvp)
+    endif
+  endfor  
+end
+
+//-------------------------------------------------------------------------------------------------
+// Draws unloaded disassembly velocity from a distribution of loaded disassembly velocities.
+// 
+// First, unloaded disassembly velocities are calculated by dividing loaded velocities by the exponentials 
+// that describe how velocity changes in response to force, exp(F/Fs), where F is the average 
+// force of the corresponding force bins and Fs is the force-sensitivity of velocity.
+// Next, this method removes disassembly velocities that are outlier-ish-ly large or small.
+// Next, for each MT, an index is chosen at random from a uniform distribution with range equal to
+// the number of velocity measurements. The chosen index corresponds to the unloaded velocity that
+// will be the MT's "intrinsic" assembly speed.
+
+function dvelocity_choose(N)
+	variable N // N MTs
+	wave w // parameter wave
+	variable Fs = w[7] // force sensitivity of disassembly velocity
+	wave unloaded_disassembly_velocities 
+		// measured forces and corresponding MT disassembly velocities from Akiyoshi et al 2010
+	variable i // counter
+	wave vd_intrinsic // intrinsic unloaded disassembly velocity
+	variable index // index of chosen velocity
+	
+	// Calculates all unloaded velocities based on the Akiyoshi data
+	unloaded_velocity_distribution_disassembly()
+	
+	// Remove weirdly small and large disassembly velocities (<50 nm/s, >300 nm/s)
+	remove_small_large_v()
+	
+	variable Nv =  dimsize(unloaded_disassembly_velocities,0) 
+		// number of velocities in Akiyoshi paper table after cutting out large and small velocities
+	
+	// Choose velocity from the table at random
+	for(i=0;i<N;i++) // for each MT
+		index = abs(round(enoise(Nv))) // chooses a random positive number from 0 to Nv
+		if(index == Nv) // if the index is the number of velocities
+			index = 0 
+				// corrects for 0th index having half the probability of being picked compared to other indices
+				// Since there is no measurement the length of the vector (since indexing starts at 0),
+				// if the random number was rounded to the total number of velocities, this
+				// makes the index 0, which is only half as likely to be picked since it can only 
+				// be reached by rounding down, evening the probability for each index
+		endif
+		vd_intrinsic[i] = unloaded_disassembly_velocities[index]
+				// gets the unloaded velocity at the chosen index
+	endfor
+end
+
+//-------------------------------------------------------------------------------------------
+// This method creates a wave and a corresponding histogram with all unloaded disassembly
+// velocities extrapolated from loaded velocities measured in the 2010 Akiyoshi paper.
+// Unloaded velocities are calculated by dividing loaded velocities by the exponentials 
+// that describe how velocity changes in response to force, exp(F/Fs), where F is the average 
+// force of the corresponding force bins and Fs is the force-sensitivity of velocity.
+
+function unloaded_velocity_distribution_disassembly()
+	variable i // counter
+	wave w // parameter wave
+	variable Fs = w[7] // force senstivity of disassembly velocity
+	wave force_velocity_table_akiyoshi_disassembly // measured velocities under load
+	make/o/n=(dimsize(force_velocity_table_akiyoshi_disassembly,0)) unloaded_disassembly_velocities,unloaded_disassembly_velocities_hist
+	for(i=0;i<numpnts(unloaded_disassembly_velocities);i++) // for each measured velocity
+		unloaded_disassembly_velocities[i] = force_velocity_table_akiyoshi_disassembly[i][1] // loaded velocities from Akiyoshi
+		unloaded_disassembly_velocities[i] = unloaded_disassembly_velocities[i]/exp(force_velocity_table_akiyoshi_disassembly[i][0]/Fs)
+			// conversion from loaded to unloaded velocitiprintes using forces and force sensitivities
+	endfor
+	histogram /B={-700,100,7} unloaded_disassembly_velocities,unloaded_disassembly_velocities_hist
+		// Makes a histogram wave with 7 bins of size 100 nm/s starting at -700 nm/s
+end
+
+//--------------------------------------------------------------------------------------------------
+// This function removes velocities that are larger than 300 nm/s and smaller than 50 nm/s,
+// since they generally pretty drastically change the simulation outcome
+
+function remove_small_large_v()
+	variable i // counter
+	wave unloaded_disassembly_velocities 
+		// velocities from Akiyoshi 2010 extrapolated from loaded to unloaded using the functions above.
+	for(i=0;i<numpnts(unloaded_disassembly_velocities);i++) // for each velocity measurement
+		if(unloaded_disassembly_velocities[i]<-300 || unloaded_disassembly_velocities[i]>-50) // if the unloaded velocity at this index is bigger than 15
+			deletepoints i,1,unloaded_disassembly_velocities // delete the velocity at this index
+			i -= 1 // If a point was deleted, try the same point number again since it is really
+					// next velocity that has not been filtered for size
+		endif
+	endfor
+end
