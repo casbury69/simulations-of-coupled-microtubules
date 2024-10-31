@@ -1,4 +1,4 @@
-#pragma TextEncoding = "UTF-8"
+﻿#pragma TextEncoding = "UTF-8"
 #pragma rtGlobals=3				// Use modern global access method and strict wave access
 #pragma DefaultTab={3,20,4}		// Set default tab width in Igor Pro 9 and later
 
@@ -358,14 +358,31 @@ function score_model_survival()
 	variable i // counter
 	for(i=0;i<401;i++) // for each timepoint 0 to 400 seconds with 1 second intervals
 		// score survival plots
-		model_score_matrix[0][0] += (InVitro_survival_Soft_400[i] - sim_survival_400_KM1[i])^2
-		model_score_matrix[1][0] += (InVitro_survival_Soft_600[i] - sim_survival_600_KM1[i])^2
-		model_score_matrix[2][0] += (InVitro_survival_Soft_800[i] - sim_survival_800_KM1[i])^2
-		model_score_matrix[3][0] += (InVitro_survival_Soft_1200[i] - sim_survival_1200_KM1[i])^2
-		model_score_matrix[0][1] += (InVitro_survival_Stiff_400[i] - sim_survival_400_KM2[i])^2
-		model_score_matrix[1][1] += (InVitro_survival_Stiff_600[i] - sim_survival_600_KM2[i])^2
-		model_score_matrix[2][1] += (InVitro_survival_Stiff_800[i] - sim_survival_800_KM2[i])^2
-		model_score_matrix[3][1] += (InVitro_survival_Stiff_1200[i] - sim_survival_1200_KM2[i])^2	
+		if(numtype(InVitro_survival_Soft_400[i]) == 0 && numtype(sim_survival_400_KM1[i]) == 0)
+			// if these values exist
+			model_score_matrix[0][0] += (InVitro_survival_Soft_400[i] - sim_survival_400_KM1[i])^2
+		endif
+		if(numtype(InVitro_survival_Soft_600[i]) == 0 && numtype(sim_survival_600_KM1[i]) == 0)
+			model_score_matrix[1][0] += (InVitro_survival_Soft_600[i] - sim_survival_600_KM1[i])^2
+		endif
+		if(numtype(InVitro_survival_Soft_800[i]) == 0 && numtype(sim_survival_800_KM1[i]) == 0)
+			model_score_matrix[2][0] += (InVitro_survival_Soft_800[i] - sim_survival_800_KM1[i])^2
+		endif
+		if(numtype(InVitro_survival_Soft_1200[i]) == 0 && numtype(sim_survival_1200_KM1[i]) == 0)
+			model_score_matrix[3][0] += (InVitro_survival_Soft_1200[i] - sim_survival_1200_KM1[i])^2
+		endif
+		if(numtype(InVitro_survival_Stiff_400[i]) == 0 && numtype(sim_survival_400_KM2[i]) == 0)
+			model_score_matrix[0][1] += (InVitro_survival_Stiff_400[i] - sim_survival_400_KM2[i])^2
+		endif	
+		if(numtype(InVitro_survival_Stiff_600[i]) == 0 && numtype(sim_survival_600_KM2[i]) == 0)
+			model_score_matrix[1][1] += (InVitro_survival_Stiff_600[i] - sim_survival_600_KM2[i])^2
+		endif
+		if(numtype(InVitro_survival_Stiff_800[i]) == 0 && numtype(sim_survival_800_KM2[i]) == 0)
+			model_score_matrix[2][1] += (InVitro_survival_Stiff_800[i] - sim_survival_800_KM2[i])^2
+		endif
+		if(numtype(InVitro_survival_Stiff_1200[i]) == 0 && numtype(sim_survival_1200_KM2[i]) == 0)
+			model_score_matrix[3][1] += (InVitro_survival_Stiff_1200[i] - sim_survival_1200_KM2[i])^2
+		endif	
 			
 		// score standard deviation of tip separation
 		model_score_stdev_matrix[0] += (soft_stdev_invitro[i] - avgd_1s_intervals_stdev1[i])^2
@@ -764,11 +781,14 @@ function kpsim_rep(tott,maxstep,num,N)
   for(i=0;i<401;i++) // 400 seconds
     duplicate/O avgd_dummy,$("avgd_" + num2str(i))	
   endfor
+  
+  make/o/n=(num) offness = nan // how off was the '400-second' timepoint timewise
+  make/o/n=(num) offness_dist = nan // how off was the '400-second' timepoint distance-wise
 
   for(i=0;i<num;i++) // for each simulation
     kpsim_initialize(tott,maxstep,N) // create waves to store simulation information and choose intrinsic velocities
     kpsim(tott,maxstep,N) // runs one sim
-    
+        
     // calculates and stores tip separations at 1s intervals
     if(N == 2) // 2 MTs
     	for(j=0;j<numpnts(distances);j++) // for each timepoint
@@ -776,10 +796,21 @@ function kpsim_rep(tott,maxstep,num,N)
     		// separation distance between tips is the difference in their positions
     	endfor
 
+		// remake tp to be 1D
+		make/o/n=(dimsize(tp,0)) tp_1D
+		for(j=0;j<dimsize(tp,0);j++)
+			tp_1D[j] = tp[j][0]
+		endfor
+
     	for(j=0;j<401;j++) // 400 seconds of growth
       		duplicate/O $("avgd_" + num2str(j)),avgd_dummy // copy current set of tip separations at the jth second into dummy wave
-    		if(wavemax(tp) >= j) // if the jth timepoint does not exceed simulation time
-    			avgd_dummy[i] = distances[x2pnt(tp,j)] // add a new data point to the tip separation wave
+    		if(wavemax(tp_1D) >= j) // if the jth timepoint does not exceed simulation time
+    			findlevel/P/q tp_1D,j
+    			avgd_dummy[i] = distances[round(v_levelx)] // add a new data point to the tip separation wave
+    			if(j==400)
+    				offness[i] = tp[j]
+    				offness_dist[i] = avgd_dummy[i] - distances[j]
+    			endif
     		else
     			avgd_dummy[i] = Nan
     		endif
@@ -803,7 +834,7 @@ function consolidate_avgd()
 	
 	for(i=0;i<401;i++)
 		duplicate/o $("avgd_" + num2str(i)),avgd_dummy
-		wavestats avgd_dummy
+		wavestats/q avgd_dummy
 		avgd_1s_intervals[i] = V_avg
 		avgd_1s_intervals_SEM[i] = V_sem
 		avgd_1s_intervals_stdev[i] = V_sdev
@@ -853,28 +884,28 @@ function survival_plot_sim()
 				endfor
 				break
 			endif
-			if(avgd_matrix[j][i] < 1.2 && end_flag[3] == 0)
+			if(avgd_matrix[j][i] < 1.200 && end_flag[3] == 0)
 				sim_survival_1200[j] += 1
 				sim_survival_1200_KM[j] += 1
 			elseif(end_flag[3] == 0)
 				death_count_1200[j] += 1
 				end_flag[3] = 1
 			endif
-			if(avgd_matrix[j][i] < .8 && end_flag[2] == 0)
+			if(avgd_matrix[j][i] < .800 && end_flag[2] == 0)
 				sim_survival_800[j] += 1
 				sim_survival_800_KM[j] += 1
 			elseif(end_flag[2] == 0)
 				death_count_800[j] += 1
 				end_flag[2] = 1
 			endif
-			if(avgd_matrix[j][i] < .6 && end_flag[1] == 0)
+			if(avgd_matrix[j][i] < .600 && end_flag[1] == 0)
 				sim_survival_600[j] += 1
 				sim_survival_600_KM[j] += 1
 			elseif(end_flag[1] == 0)
 				death_count_600[j] += 1
 				end_flag[1] = 1
 			endif
-			if(avgd_matrix[j][i] < .4 && end_flag[0] == 0)
+			if(avgd_matrix[j][i] < .400 && end_flag[0] == 0)
 				sim_survival_400[j] += 1
 				sim_survival_400_KM[j] += 1
 			elseif(end_flag[0] == 0)
@@ -891,30 +922,42 @@ function survival_plot_sim()
 	sim_survival_800_KM[0] /= dimsize(avgd_matrix,1)
 	sim_survival_1200_KM[0] /= dimsize(avgd_matrix,1)
 	
+	variable sum_400 = 0 // sum of dj/(nj*(nj-dj)) for all j up to and including current at 400 nm threshold
+	variable sum_600 = 0 
+	variable sum_800 = 0 
+	variable sum_1200 = 0 
 	
 	// calculate kaplan meier survival probabilities
 	for(i=1;i<401;i++)
-		if((sim_survival_400[i] + death_count_400[i]) != 0) // don't divide by 0
-			sim_survival_400_KM[i] = sim_survival_400_KM[i-1]*(sim_survival_400[i]/(sim_survival_400[i]+death_count_400[i]))
+		if(sim_survival_400[i-1] != 0) // don't divide by 0
+			sim_survival_400_KM[i] = sim_survival_400_KM[i-1]*(1-death_count_400[i]/sim_survival_400[i-1])
 		else
-			sim_survival_400_KM[i] = 0
+			sim_survival_400_KM[i] = nan
 		endif
-		if((sim_survival_600[i] + death_count_600[i]) != 0) // don't divide by 0
-			sim_survival_600_KM[i] = sim_survival_600_KM[i-1]*(sim_survival_600[i]/(sim_survival_600[i]+death_count_600[i]))
+		if(sim_survival_600[i-1] != 0) // don't divide by 0
+			sim_survival_600_KM[i] = sim_survival_600_KM[i-1]*(1-death_count_600[i]/sim_survival_600[i-1])
 		else
-			sim_survival_600_KM[i] = 0
+			sim_survival_600_KM[i] = nan
 		endif
-		if((sim_survival_800[i] + death_count_800[i]) != 0) // don't divide by 0
-			sim_survival_800_KM[i] = sim_survival_800_KM[i-1]*(sim_survival_800[i]/(sim_survival_800[i]+death_count_800[i]))
+		if(sim_survival_800[i-1] != 0) // don't divide by 0
+			sim_survival_800_KM[i] = sim_survival_800_KM[i-1]*(1-death_count_800[i]/sim_survival_800[i-1])
 		else
-			sim_survival_800_KM[i] = 0
+			sim_survival_800_KM[i] = nan
 		endif
-		if((sim_survival_1200[i] + death_count_1200[i]) != 0) // don't divide by 0
-			sim_survival_1200_KM[i] = sim_survival_1200_KM[i-1]*(sim_survival_1200[i]/(sim_survival_1200[i]+death_count_1200[i]))
+		if(sim_survival_1200[i-1] != 0) // don't divide by 0
+			sim_survival_1200_KM[i] = sim_survival_1200_KM[i-1]*(1-death_count_1200[i]/sim_survival_1200[i-1])
 		else
-			sim_survival_1200_KM[i] = 0
+			sim_survival_1200_KM[i] = nan
 		endif
 	endfor
+	
+	for(i=0;i<401;i++)
+		sim_survival_400[i] /= dimsize(avgd_matrix,1)
+		sim_survival_600[i] /= dimsize(avgd_matrix,1)
+		sim_survival_800[i] /= dimsize(avgd_matrix,1)
+		sim_survival_1200[i] /= dimsize(avgd_matrix,1)
+	endfor
+
 end
 
 function matrixify_avgd(num)
